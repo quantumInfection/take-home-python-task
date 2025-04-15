@@ -1,6 +1,7 @@
 from fastapi import Depends, HTTPException, Security, status
 from fastapi.security import APIKeyHeader
 import os
+from app.core.config import settings
 
 # API key header extractor
 API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -19,16 +20,13 @@ async def get_api_key_from_header(api_key_header: str = Security(API_KEY_HEADER)
             detail="API Key header is missing",
         )
     
-    # Get the API key from environment
-    api_key = get_api_key()
-    
-    if api_key is None:
+    if not settings.API_KEY:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="API Key not configured on server",
         )
     
-    if api_key_header != api_key:
+    if api_key_header != settings.API_KEY:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API Key",
