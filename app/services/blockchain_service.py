@@ -107,29 +107,47 @@ class BlockchainService:
 
             if hotkey is None:
                 # If hotkey is not provided, get dividends for all hotkeys in the subnet
-                # First, get all neurons in the subnet
                 metagraph = await subtensor.metagraph(netuid=actual_netuid)
 
-                # Query dividends for each hotkey using the state query
                 results = []
                 for uid, neuron_hotkey in enumerate(metagraph.hotkeys):
                     try:
                         # Use direct substrate interface to query TaoDividendsPerSubnet
-                        # Based on the README example: https://github.com/opentensor/async-substrate-interface/pull/84
-                        dividend = await subtensor.substrate.query_map(
+                        dividend_query_result = await subtensor.substrate.query_map(
                             module="SubtensorModule",
                             storage_function="TaoDividendsPerSubnet",
                             params=[actual_netuid, neuron_hotkey],
                         )
+                        # Log the raw result for debugging
+                        logger.debug(
+                            f"Raw query_map result for {neuron_hotkey}: {dividend_query_result!r}"
+                        )  # Added logging
 
-                        # Extract the value from the query result
                         dividend_value = 0.0
-                        if dividend:
-                            # Process the result based on the actual return structure
-                            dividend_value = (
-                                float(dividend[0][1].value)
-                                if dividend[0][1].value
-                                else 0.0
+                        # Refined extraction logic with better checks
+                        if (
+                            dividend_query_result
+                            and isinstance(dividend_query_result, list)
+                            and len(dividend_query_result) > 0
+                        ):
+                            # Assuming the structure is like [(key_info, value_object)]
+                            value_object = dividend_query_result[0][
+                                1
+                            ]  # Check index 1 for value
+                            if value_object and hasattr(value_object, "value"):
+                                # Convert to float, handle potential None value explicitly
+                                raw_value = value_object.value
+                                # Check if raw_value is not None before converting to float
+                                dividend_value = (
+                                    float(raw_value) if raw_value is not None else 0.0
+                                )
+                            else:
+                                logger.warning(
+                                    f"Value object for {neuron_hotkey} has unexpected structure or no 'value' attribute: {value_object!r}"
+                                )
+                        elif dividend_query_result:
+                            logger.warning(
+                                f"query_map result for {neuron_hotkey} has unexpected structure: {dividend_query_result!r}"
                             )
 
                         # Simplified response item, removing uid
@@ -137,7 +155,7 @@ class BlockchainService:
                             {
                                 "netuid": actual_netuid,
                                 "hotkey": neuron_hotkey,
-                                "dividend": dividend_value,
+                                "dividend": dividend_value,  # Use the extracted value
                             }
                         )
                     except Exception as e:
@@ -152,24 +170,33 @@ class BlockchainService:
                 }
             else:
                 # Query dividend for specific hotkey
-                dividend = await subtensor.substrate.query(
+                dividend_query_result = await subtensor.substrate.query(
                     module="SubtensorModule",
                     storage_function="TaoDividendsPerSubnet",
                     params=[actual_netuid, actual_hotkey],
                 )
+                # Log the raw result for debugging
+                logger.debug(
+                    f"Raw query result for {actual_hotkey}: {dividend_query_result!r}"
+                )  # Added logging
 
-                # Extract the dividend value
-                dividend_value = (
-                    float(dividend.value)
-                    if dividend and hasattr(dividend, "value")
-                    else 0.0
-                )
+                dividend_value = 0.0
+                # Refined extraction logic
+                if dividend_query_result and hasattr(dividend_query_result, "value"):
+                    # Convert to float, handle potential None value explicitly
+                    raw_value = dividend_query_result.value
+                    # Check if raw_value is not None before converting to float
+                    dividend_value = float(raw_value) if raw_value is not None else 0.0
+                elif dividend_query_result:
+                    logger.warning(
+                        f"Query result for {actual_hotkey} has no 'value' attribute: {dividend_query_result!r}"
+                    )
 
                 # Response for single hotkey matches core fields of README example
                 return {
                     "netuid": actual_netuid,
                     "hotkey": actual_hotkey,
-                    "dividend": dividend_value,
+                    "dividend": dividend_value,  # Use the extracted value
                 }
 
         except Exception as e:
