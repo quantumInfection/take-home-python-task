@@ -1,11 +1,11 @@
 from typing import Optional, List, Dict, Any
 import logging
-import random
-import time
+import asyncio
 from celery.exceptions import SoftTimeLimitExceeded  # type: ignore
 
 from app.worker import celery_app
 from app.core.config import settings
+from app.services.sentiment_service import SentimentService
 
 logger = logging.getLogger(__name__)
 
@@ -51,110 +51,6 @@ def validate_error_types():
 # initialization in main.py or worker.py, not at module import time
 
 
-def perform_twitter_sentiment_analysis(netuid: int, hotkey: str) -> Dict[str, Any]:
-    """
-    Synchronous function that simulates Twitter sentiment analysis workflow.
-    In a real implementation, this would make API calls to Twitter
-    and perform sentiment analysis on the results.
-
-    Args:
-        netuid: The subnet ID to analyze sentiment for
-        hotkey: The hotkey to associate with the sentiment analysis
-
-    Returns:
-        Dictionary containing sentiment analysis results
-    """
-    # Log that we're executing the function
-    logger.info(f"Executing sentiment analysis for netuid={netuid}, hotkey={hotkey}")
-
-    try:
-        # In a real implementation:
-        # 1. Fetch tweets related to the asset
-        logger.debug(f"Fetching tweets for netuid={netuid}")
-        # twitter_client = TwitterClient(api_key=settings.TWITTER_API_KEY)
-        # tweets = twitter_client.get_tweets(keywords=[f"tao {netuid}", "bittensor"])
-
-        # Simulate processing time (Twitter API call)
-        time.sleep(1)
-
-        # 2. Process tweets and perform sentiment analysis
-        logger.debug("Performing sentiment analysis on tweets")
-        # sentiment_analyzer = SentimentAnalyzer()
-        # analyzed_tweets = [sentiment_analyzer.analyze(tweet) for tweet in tweets]
-
-        # Simulate processing time (sentiment analysis)
-        time.sleep(1)
-
-        # 3. Aggregate results and calculate overall sentiment score
-        # sentiment_score = calculate_weighted_sentiment(analyzed_tweets)
-
-        # For mock implementation: Generate a random sentiment score
-        sentiment_score = random.randint(-100, 100)
-        num_tweets = random.randint(5, 20)
-
-        logger.info(
-            f"Generated sentiment score: {sentiment_score} based on {num_tweets} tweets for netuid={netuid}"
-        )
-
-        return {
-            "success": True,
-            "netuid": netuid,
-            "hotkey": hotkey,
-            "sentiment_score": sentiment_score,
-            "num_tweets_analyzed": num_tweets,
-            "is_mocked": True,
-        }
-
-    except ConnectionError as e:
-        # Handle network connectivity issues
-        error_msg = f"Network error while connecting to Twitter API: {str(e)}"
-        logger.error(error_msg)
-        # Log the detailed error but return a standardized response
-        return create_error_response(
-            netuid,
-            hotkey,
-            ERROR_TYPES["CONNECTION_ERROR"],
-            STANDARD_ERROR_MESSAGES["CONNECTION_ERROR"],
-            original_error=str(e),
-        )
-
-    except ValueError as e:
-        # Handle issues with invalid parameters
-        error_msg = f"Value error in sentiment analysis: {str(e)}"
-        logger.error(error_msg)
-        return create_error_response(
-            netuid,
-            hotkey,
-            ERROR_TYPES["VALUE_ERROR"],
-            STANDARD_ERROR_MESSAGES["VALUE_ERROR"],
-            original_error=str(e),
-        )
-
-    except KeyError as e:
-        # Handle issues with missing expected data
-        error_msg = f"Missing expected data in API response: {str(e)}"
-        logger.error(error_msg)
-        return create_error_response(
-            netuid,
-            hotkey,
-            ERROR_TYPES["DATA_ERROR"],
-            STANDARD_ERROR_MESSAGES["DATA_ERROR"],
-            original_error=str(e),
-        )
-
-    except Exception as e:
-        # Catch-all for unexpected errors
-        error_msg = f"Unexpected error during sentiment analysis: {str(e)}"
-        logger.error(f"{error_msg}. Traceback: ", exc_info=True)
-        return create_error_response(
-            netuid,
-            hotkey,
-            ERROR_TYPES["UNKNOWN_ERROR"],
-            STANDARD_ERROR_MESSAGES["UNKNOWN_ERROR"],
-            original_error=str(e),
-        )
-
-
 def create_error_response(
     netuid: int,
     hotkey: str,
@@ -184,15 +80,14 @@ def create_error_response(
         "netuid": netuid,
         "hotkey": hotkey,
         "error_type": error_type,
-        "error": error_message,  # Changed from error_message to error for consistency
-        "is_mocked": True,
+        "error": error_message,
     }
 
 
 @celery_app.task(name="analyze_twitter_sentiment")
 def analyze_twitter_sentiment_task(netuid: int, hotkey: str) -> Dict[str, Any]:
     """
-    Mocked Celery task that simulates the Twitter sentiment analysis workflow.
+    Celery task that performs Twitter sentiment analysis for a Bittensor subnet.
 
     Args:
         netuid: The subnet ID to analyze sentiment for
@@ -202,8 +97,25 @@ def analyze_twitter_sentiment_task(netuid: int, hotkey: str) -> Dict[str, Any]:
         Dictionary containing sentiment analysis results
     """
     try:
-        # Simply call the synchronous function directly
-        result = perform_twitter_sentiment_analysis(netuid, hotkey)
+        # Use default values if not provided
+        actual_netuid = netuid if netuid is not None else settings.DEFAULT_NETUID
+        actual_hotkey = hotkey if hotkey is not None else settings.DEFAULT_HOTKEY
+
+        logger.info(
+            f"Starting sentiment analysis for netuid={actual_netuid}, hotkey={actual_hotkey}"
+        )
+
+        # Initialize sentiment service
+        sentiment_service = SentimentService()
+
+        # Run the sentiment analysis in the asyncio event loop
+        result = asyncio.run(
+            sentiment_service.analyze_sentiment_for_subnet(actual_netuid)
+        )
+
+        # Add hotkey to the result
+        result["hotkey"] = actual_hotkey
+
         return result
 
     except SoftTimeLimitExceeded:
@@ -217,4 +129,18 @@ def analyze_twitter_sentiment_task(netuid: int, hotkey: str) -> Dict[str, Any]:
             hotkey,
             ERROR_TYPES["TIMEOUT_ERROR"],
             STANDARD_ERROR_MESSAGES["TIMEOUT_ERROR"],
+        )
+    except Exception as e:
+        logger.error(f"Error in sentiment analysis task: {str(e)}", exc_info=True)
+
+        # Categorize the error
+        if "connect" in str(e).lower() or "timeout" in str(e).lower():
+            error_type = ERROR_TYPES["CONNECTION_ERROR"]
+            error_message = STANDARD_ERROR_MESSAGES["CONNECTION_ERROR"]
+        else:
+            error_type = ERROR_TYPES["UNKNOWN_ERROR"]
+            error_message = STANDARD_ERROR_MESSAGES["UNKNOWN_ERROR"]
+
+        return create_error_response(
+            netuid, hotkey, error_type, error_message, original_error=str(e)
         )
