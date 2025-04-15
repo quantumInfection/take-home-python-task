@@ -7,10 +7,12 @@ import logging
 import traceback
 import redis
 import contextlib
+from celery import chain
 from celery.exceptions import CeleryError, TaskRevokedError, TimeoutError as CeleryTimeoutError  # type: ignore
 from celery.result import AsyncResult  # type: ignore
 
 from app.services.cache_service import RedisCacheService
+from app.services.blockchain_service import BlockchainService
 from app.core.config import settings
 from app.auth.auth import get_api_key_from_header
 from app.tasks.sentiment_tasks import analyze_twitter_sentiment_task
@@ -19,8 +21,9 @@ import time
 
 router = APIRouter(tags=["Tao Dividends"])
 
-# Initialize cache service
+# Initialize services
 cache_service = RedisCacheService()
+blockchain_service = BlockchainService()
 logger = logging.getLogger(__name__)
 
 
@@ -45,6 +48,7 @@ ERROR_CATEGORIES = {
     "TASK_REVOKED": "Task was revoked or cancelled",
     "TIMEOUT_ERROR": "Task execution timed out",
     "UNKNOWN_ERROR": "Unknown error during task processing",
+    "BLOCKCHAIN_ERROR": "Error querying blockchain data",
 }
 
 
@@ -277,29 +281,32 @@ def manage_tasks():
                 logger.info(f"Task cleanup metrics: {manager.revocation_metrics}")
 
 
-# Mock function to simulate blockchain query with delay
-async def mock_get_tao_dividends(
+async def get_tao_dividends(
     netuid: Optional[int], hotkey: Optional[str]
 ) -> Dict[str, Any]:
     """
-    Simulate blockchain query with artificial delay.
-    In a real implementation, this would query the Bittensor blockchain.
+    Query the blockchain for Tao dividends.
+    Uses the BlockchainService to make the real blockchain query.
+
+    Args:
+        netuid: Optional subnet ID
+        hotkey: Optional account hotkey
+
+    Returns:
+        Dictionary with dividend data
     """
-    # Simulate network delay
-    await asyncio.sleep(2)
-
-    # Use default values if not provided
-    actual_netuid = netuid if netuid is not None else settings.DEFAULT_NETUID
-    actual_hotkey = hotkey if hotkey is not None else settings.DEFAULT_HOTKEY
-
-    # Mock dividend value (would come from blockchain in real implementation)
-    mock_dividend = 12345678
-
-    return {"netuid": actual_netuid, "hotkey": actual_hotkey, "dividend": mock_dividend}
+    try:
+        return await blockchain_service.get_tao_dividends(netuid, hotkey)
+    except Exception as e:
+        logger.error(f"Error querying blockchain: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Error querying blockchain: {str(e)}",
+        )
 
 
 @router.get("/tao_dividends")
-async def get_tao_dividends(
+async def tao_dividends_endpoint(
     netuid: Optional[int] = Query(None, description="Subnet ID"),
     hotkey: Optional[str] = Query(None, description="Account hotkey"),
     trade: bool = Query(False, description="Trigger sentiment analysis and staking"),
@@ -343,44 +350,67 @@ async def get_tao_dividends(
         # Data found in cache
         result = {**cached_result, "cached": True}
     else:
-        # Cache miss - query from "blockchain" (mock)
-        result = await mock_get_tao_dividends(actual_netuid, actual_hotkey)
+        # Cache miss - query from blockchain
+        try:
+            result = await get_tao_dividends(actual_netuid, actual_hotkey)
 
-        # Cache the result
-        cache_service.cache_data(actual_netuid, actual_hotkey, result)
-        result["cached"] = False
+            # Cache the result
+            cache_service.cache_data(actual_netuid, actual_hotkey, result)
+            result["cached"] = False
+        except Exception as e:
+            # Handle blockchain query errors
+            error_category = ERROR_CATEGORIES["BLOCKCHAIN_ERROR"]
+            error_details = f"Error querying blockchain: {str(e)}"
+            log_error(error_category, error_details)
 
-    # If trade is true, trigger mock background tasks for sentiment analysis and staking
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={
+                    "error": error_category,
+                    "detail": str(e),
+                    "netuid": actual_netuid,
+                    "hotkey": actual_hotkey,
+                },
+            )
+
+    # If trade is true, trigger sentiment analysis and staking background tasks
     if trade:
         with manage_tasks() as task_manager:
             try:
-                # Run sentiment analysis as a background task with explicit timeout
-                # Setting a reasonable timeout for the sentiment analysis task
-                task_manager.sentiment_task = analyze_twitter_sentiment_task.apply_async(
-                    args=[actual_netuid, actual_hotkey],
+                # Define the first task (sentiment analysis)
+                sentiment_signature = analyze_twitter_sentiment_task.s(
+                    actual_netuid, actual_hotkey
+                ).set(
                     time_limit=10,  # 10 seconds timeout for sentiment analysis
                     soft_time_limit=8,  # Soft timeout to allow for graceful handling
                 )
 
-                if not task_manager.sentiment_task:
-                    raise TaskCreationError("Failed to create sentiment analysis task")
-
-                # Chain the result of sentiment analysis to the blockchain task with timeout
-                task_manager.task_chain = task_manager.sentiment_task.then(
-                    process_stake_based_on_sentiment_task.s(
-                        actual_netuid, actual_hotkey
-                    ).set(
-                        time_limit=15,  # 15 seconds timeout for blockchain operation
-                        soft_time_limit=12,  # Soft timeout for graceful handling
-                    )
+                # Define the second task (blockchain processing)
+                blockchain_signature = process_stake_based_on_sentiment_task.s(
+                    actual_netuid, actual_hotkey
+                ).set(
+                    time_limit=15,  # 15 seconds timeout for blockchain operation
+                    soft_time_limit=12,  # Soft timeout for graceful handling
                 )
 
-                if not task_manager.task_chain:
+                # Create the chain
+                task_chain_result = chain(
+                    sentiment_signature, blockchain_signature
+                ).apply_async()
+
+                if not task_chain_result:
                     raise TaskChainingError("Failed to create task chain")
 
+                # task_chain_result is an AsyncResult; its id is the id of the *last* task
+                task_manager.task_chain = task_chain_result
+                # Keep track of the first task's result if needed for individual monitoring/revocation
+                # Note: task_chain_result.parent gives the result of the previous task in the chain
+                task_manager.sentiment_task = task_chain_result.parent
+
                 # Store reference to the full chain for proper monitoring
-                chain_result = AsyncResult(task_manager.task_chain.id)
-                task_manager.full_chain = chain_result
+                # The AsyncResult returned by chain() represents the final task
+                chain_result = task_manager.task_chain
+                task_manager.full_chain = chain_result  # Redundant? task_chain already holds this. Let's keep task_chain as the main reference.
 
                 # Track the chain lineage with a depth limit to avoid excessive traversal
                 chain_lineage = []
@@ -390,20 +420,23 @@ async def get_tao_dividends(
 
                 while current_task and current_task.parent and depth < max_depth:
                     chain_lineage.append(current_task.id)
-                    current_task = current_task.parent
+                    # Access the parent AsyncResult correctly
+                    parent_result = (
+                        AsyncResult(current_task.parent.id)
+                        if current_task.parent
+                        else None
+                    )
+                    current_task = parent_result
                     depth += 1
+
+                # Add the root task ID if it exists and wasn't added
+                if current_task and current_task.id not in chain_lineage:
+                    chain_lineage.append(current_task.id)
 
                 if depth >= max_depth and current_task and current_task.parent:
                     logger.warning(
                         f"Chain lineage traversal stopped at depth {max_depth}. Chain may be longer than expected."
                     )
-
-                # Add the root task (sentiment_task) if not already included
-                if (
-                    task_manager.sentiment_task
-                    and task_manager.sentiment_task.id not in chain_lineage
-                ):
-                    chain_lineage.append(task_manager.sentiment_task.id)
 
                 logger.debug(
                     f"Task chain lineage (depth: {depth}): {chain_lineage[::-1]}"
@@ -417,11 +450,13 @@ async def get_tao_dividends(
 
                 # Log successful task creation
                 logger.info(
-                    f"Triggered mock sentiment analysis and staking for netuid={actual_netuid}, hotkey={actual_hotkey}"
+                    f"Triggered sentiment analysis and staking for netuid={actual_netuid}, hotkey={actual_hotkey}"
                 )
-                # Safely access task IDs to prevent AttributeError if None
+                # Safely access task IDs
                 sentiment_task_id = getattr(task_manager.sentiment_task, "id", "N/A")
-                chain_id = getattr(task_manager.task_chain, "id", "N/A")
+                chain_id = getattr(
+                    task_manager.task_chain, "id", "N/A"
+                )  # This should now work
                 logger.debug(
                     f"Task IDs: sentiment_task.id={sentiment_task_id}, chain_id={chain_id}"
                 )
@@ -437,7 +472,7 @@ async def get_tao_dividends(
                             "timeout": actual_timeout,
                         }
 
-                        # Wait for the chained task to complete with timeout
+                        # Wait for the final task in the chain to complete
                         task_result = task_manager.task_chain.get(
                             timeout=actual_timeout,
                             propagate=False,  # Don't raise exceptions from the task
@@ -526,11 +561,7 @@ async def get_tao_dividends(
     return result
 
 
-@router.get(
-    "/tao_dividends_cached",
-    deprecated=True,
-    description="This endpoint is deprecated. Please use /tao_dividends instead, which provides the same caching functionality plus additional features.",
-)
+@router.get("/tao_dividends_cached", deprecated=True)
 async def get_tao_dividends_with_cache(
     netuid: Optional[int] = Query(None, description="Subnet ID"),
     hotkey: Optional[str] = Query(None, description="Account hotkey"),
@@ -546,21 +577,7 @@ async def get_tao_dividends_with_cache(
     logger.warning(
         "Deprecated endpoint /tao_dividends_cached was called. Use /tao_dividends instead."
     )
-
-    # Try to get from cache first
-    cached_result = cache_service.get_cached_data(netuid, hotkey)
-
-    if cached_result:
-        # Data found in cache
-        return {**cached_result, "cached": True}
-
-    # Cache miss - query from "blockchain" (mock)
-    result = await mock_get_tao_dividends(netuid, hotkey)
-
-    # Cache the result
-    cache_service.cache_data(netuid, hotkey, result)
-
-    return {**result, "cached": False}
+    return await tao_dividends_endpoint(netuid=netuid, hotkey=hotkey, api_key=api_key)
 
 
 @router.get("/tao_dividends_no_cache")
@@ -573,10 +590,8 @@ async def get_tao_dividends_without_cache(
     Get Tao dividends directly without using cache.
     Always performs a fresh blockchain query.
     """
-    # Directly query from "blockchain" (mock)
-    result = await mock_get_tao_dividends(netuid, hotkey)
-
-    return result
+    # Directly query from blockchain
+    return await get_tao_dividends(netuid, hotkey)
 
 
 @router.post("/purge_cache")

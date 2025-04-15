@@ -1,32 +1,46 @@
 from typing import Dict, Any, Optional
 import logging
-import time
-import random
+import asyncio
 from celery.exceptions import SoftTimeLimitExceeded  # type: ignore
 from app.worker import celery_app
 from app.core.config import settings
+from app.services.blockchain_service import BlockchainService
 
 logger = logging.getLogger(__name__)
 
 
 @celery_app.task(name="process_stake_based_on_sentiment")
 def process_stake_based_on_sentiment_task(
-    netuid: int, hotkey: str, sentiment_score: float
+    sentiment_result: Dict[str, Any], netuid: int = None, hotkey: str = None
 ) -> Dict[str, Any]:
     """
-    Mocked task that simulates processing stake/unstake operations based on sentiment analysis.
+    Process stake/unstake operations based on sentiment analysis results.
 
     Args:
-        netuid: The subnet ID to stake/unstake on
-        hotkey: The hotkey to stake/unstake to
-        sentiment_score: The sentiment score (-100 to +100)
+        sentiment_result: The result from sentiment analysis task
+        netuid: The subnet ID to stake/unstake on (optional)
+        hotkey: The hotkey to stake/unstake to (optional)
     """
+    sentiment_score = 0  # Initialize outside try block for exception handling
     try:
-        logger.info(
-            f"Executing mocked blockchain operation for netuid={netuid}, hotkey={hotkey}, sentiment={sentiment_score}"
-        )
+        # Extract sentiment score from the sentiment analysis result
+        if not sentiment_result.get("success", False):
+            logger.error(
+                f"Sentiment analysis failed: {sentiment_result.get('error', 'Unknown error')}"
+            )
+            return {
+                "success": False,
+                "operation": "none",
+                "error": f"Sentiment analysis failed: {sentiment_result.get('error', 'Unknown error')}",
+                "netuid": netuid,
+                "hotkey": hotkey,
+                "sentiment_result": sentiment_result,
+            }
 
-        # Use default values from settings if None (consistent with routes.py)
+        sentiment_score = sentiment_result.get("sentiment_score", 0.0)
+        logger.info(f"Processing stake based on sentiment score: {sentiment_score}")
+
+        # Use default values if not provided
         netuid = netuid if netuid is not None else settings.DEFAULT_NETUID
         hotkey = hotkey if hotkey is not None else settings.DEFAULT_HOTKEY
 
@@ -34,53 +48,43 @@ def process_stake_based_on_sentiment_task(
         amount = abs(sentiment_score) * 0.01
 
         # Early exit for zero amount
-        if amount <= 0:
+        if amount <= 0.001:  # Minimum threshold to avoid dust transactions
             return {
                 "success": True,
                 "operation": "none",
-                "message": "Sentiment score resulted in zero stake amount",
+                "message": "Sentiment score resulted in zero or negligible stake amount",
                 "netuid": netuid,
                 "hotkey": hotkey,
                 "sentiment_score": sentiment_score,
                 "amount": 0,
-                "is_mocked": True,
             }
 
         # For positive sentiment: stake, for negative: unstake
         operation = "add_stake" if sentiment_score > 0 else "unstake"
 
-        # Simulate processing time with variable sleep based on operation and amount
-        # Higher amounts and unstaking operations generally take longer
-        simulate_blockchain_operation(operation, amount)
+        # Initialize blockchain service
+        blockchain_service = BlockchainService()
 
-        # Random success/failure to simulate real-world behavior
-        success = random.random() > 0.1  # 90% success rate
+        # Create new event loop for asyncio.run
+        asyncio.set_event_loop(asyncio.new_event_loop())
 
-        # Generate a mock transaction hash
-        mock_hash = "0x" + "".join(random.choice("0123456789abcdef") for _ in range(64))
+        # Run the operation in the asyncio event loop
+        if operation == "add_stake":
+            result = asyncio.run(blockchain_service.add_stake(netuid, hotkey, amount))
+        else:
+            result = asyncio.run(blockchain_service.unstake(netuid, hotkey, amount))
 
-        result = {
-            "success": success,
-            "operation": operation,
-            "netuid": netuid,
-            "hotkey": hotkey,
-            "amount": amount,
-            "sentiment_score": sentiment_score,
-            "hash": mock_hash if success else None,
-            "error": None if success else "Simulated blockchain error",
-            "is_mocked": True,
-        }
+        # Add sentiment information to the result
+        result["sentiment_score"] = sentiment_score
 
-        logger.info(
-            f"Completed mock {operation} operation: {'success' if success else 'failed'}"
-        )
+        logger.info(f"Completed blockchain {operation} operation: {result['success']}")
 
         return result
 
     except SoftTimeLimitExceeded:
         # Handle soft time limit exceeded gracefully
         logger.warning(
-            f"Blockchain operation timed out for netuid={netuid}, hotkey={hotkey}, sentiment={sentiment_score}"
+            f"Blockchain operation timed out for netuid={netuid}, hotkey={hotkey}"
         )
 
         # Prepare a response for the timeout situation
@@ -96,41 +100,15 @@ def process_stake_based_on_sentiment_task(
             "sentiment_score": sentiment_score,
             "hash": None,
             "error": "Task timed out during blockchain operation",
-            "is_mocked": True,
             "timed_out": True,
         }
-
-
-def simulate_blockchain_operation(operation: str, amount: float) -> None:
-    """
-    Simulates blockchain operation with variable processing time based on operation type and amount.
-
-    Args:
-        operation: The type of operation ('add_stake' or 'unstake')
-        amount: The amount of TAO being staked/unstaked
-    """
-    # Base sleep time for any blockchain operation
-    base_sleep_time = 1.5  # seconds
-
-    # Additional sleep time based on amount (larger amounts take longer to process)
-    # Scale is dampened with sqrt to avoid excessive times for large amounts
-    amount_factor = min(1.5, (amount / 10) ** 0.5)
-
-    # Operation-specific factors (unstaking generally takes longer than staking)
-    operation_factor = 1.2 if operation == "unstake" else 1.0
-
-    # Calculate total sleep time
-    total_sleep_time = base_sleep_time * operation_factor * amount_factor
-
-    # Add slight randomness to simulate network variability (±15%)
-    randomness = random.uniform(0.85, 1.15)
-    final_sleep_time = total_sleep_time * randomness
-
-    logger.debug(
-        f"Simulating {operation} of {amount} TAO: sleep for {final_sleep_time:.2f}s "
-        f"(base={base_sleep_time}s, amount_factor={amount_factor:.2f}, "
-        f"operation_factor={operation_factor:.2f}, randomness={randomness:.2f})"
-    )
-
-    # Execute the sleep
-    time.sleep(final_sleep_time)
+    except Exception as e:
+        logger.error(f"Error in blockchain operation: {str(e)}", exc_info=True)
+        return {
+            "success": False,
+            "operation": "unknown",
+            "netuid": netuid,
+            "hotkey": hotkey,
+            "sentiment_score": sentiment_result.get("sentiment_score", 0),
+            "error": str(e),
+        }
