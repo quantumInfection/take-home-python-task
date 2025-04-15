@@ -3,6 +3,9 @@ from pydantic import BaseModel
 
 
 class Settings(BaseModel):
+    # API authentication
+    API_KEY: str = os.getenv("API_KEY", "")
+
     # Redis settings
     REDIS_HOST: str = os.getenv("REDIS_HOST", "localhost")
     REDIS_PORT: int = int(os.getenv("REDIS_PORT", "6379"))
