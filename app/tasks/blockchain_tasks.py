@@ -46,11 +46,12 @@ def process_stake_based_on_sentiment_task(
                 "is_mocked": True,
             }
 
-        # Simulate processing time (blockchain transactions are slow)
-        time.sleep(3)
-
         # For positive sentiment: stake, for negative: unstake
         operation = "add_stake" if sentiment_score > 0 else "unstake"
+
+        # Simulate processing time with variable sleep based on operation and amount
+        # Higher amounts and unstaking operations generally take longer
+        simulate_blockchain_operation(operation, amount)
 
         # Random success/failure to simulate real-world behavior
         success = random.random() > 0.1  # 90% success rate
@@ -98,3 +99,38 @@ def process_stake_based_on_sentiment_task(
             "is_mocked": True,
             "timed_out": True,
         }
+
+
+def simulate_blockchain_operation(operation: str, amount: float) -> None:
+    """
+    Simulates blockchain operation with variable processing time based on operation type and amount.
+
+    Args:
+        operation: The type of operation ('add_stake' or 'unstake')
+        amount: The amount of TAO being staked/unstaked
+    """
+    # Base sleep time for any blockchain operation
+    base_sleep_time = 1.5  # seconds
+
+    # Additional sleep time based on amount (larger amounts take longer to process)
+    # Scale is dampened with sqrt to avoid excessive times for large amounts
+    amount_factor = min(1.5, (amount / 10) ** 0.5)
+
+    # Operation-specific factors (unstaking generally takes longer than staking)
+    operation_factor = 1.2 if operation == "unstake" else 1.0
+
+    # Calculate total sleep time
+    total_sleep_time = base_sleep_time * operation_factor * amount_factor
+
+    # Add slight randomness to simulate network variability (±15%)
+    randomness = random.uniform(0.85, 1.15)
+    final_sleep_time = total_sleep_time * randomness
+
+    logger.debug(
+        f"Simulating {operation} of {amount} TAO: sleep for {final_sleep_time:.2f}s "
+        f"(base={base_sleep_time}s, amount_factor={amount_factor:.2f}, "
+        f"operation_factor={operation_factor:.2f}, randomness={randomness:.2f})"
+    )
+
+    # Execute the sleep
+    time.sleep(final_sleep_time)

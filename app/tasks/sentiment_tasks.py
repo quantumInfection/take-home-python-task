@@ -2,12 +2,30 @@ from typing import Optional, List, Dict, Any
 import logging
 import random
 import time
-from celery.exceptions import SoftTimeLimitExceeded
+from celery.exceptions import SoftTimeLimitExceeded  # type: ignore
 
 from app.worker import celery_app
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Define standardized error types and messages
+ERROR_TYPES = {
+    "CONNECTION_ERROR": "service_unavailable",
+    "VALUE_ERROR": "invalid_request",
+    "DATA_ERROR": "data_processing_error",
+    "TIMEOUT_ERROR": "request_timeout",
+    "UNKNOWN_ERROR": "internal_server_error",
+}
+
+# Standard error messages that don't expose implementation details
+STANDARD_ERROR_MESSAGES = {
+    "CONNECTION_ERROR": "Unable to connect to external data service",
+    "VALUE_ERROR": "Invalid parameters for sentiment analysis",
+    "DATA_ERROR": "Error processing sentiment data",
+    "TIMEOUT_ERROR": "Sentiment analysis timed out",
+    "UNKNOWN_ERROR": "An unexpected error occurred during sentiment analysis",
+}
 
 
 def perform_twitter_sentiment_analysis(netuid: int, hotkey: str) -> Dict[str, Any]:
@@ -68,53 +86,84 @@ def perform_twitter_sentiment_analysis(netuid: int, hotkey: str) -> Dict[str, An
         # Handle network connectivity issues
         error_msg = f"Network error while connecting to Twitter API: {str(e)}"
         logger.error(error_msg)
-        return {
-            "success": False,
-            "netuid": netuid,
-            "hotkey": hotkey,
-            "error": error_msg,
-            "error_type": "connection_error",
-            "is_mocked": False,
-        }
+        # Log the detailed error but return a standardized response
+        return create_error_response(
+            netuid,
+            hotkey,
+            ERROR_TYPES["CONNECTION_ERROR"],
+            STANDARD_ERROR_MESSAGES["CONNECTION_ERROR"],
+            original_error=str(e),
+        )
 
     except ValueError as e:
-        # Handle issues with invalid parameters or responses
+        # Handle issues with invalid parameters
         error_msg = f"Value error in sentiment analysis: {str(e)}"
         logger.error(error_msg)
-        return {
-            "success": False,
-            "netuid": netuid,
-            "hotkey": hotkey,
-            "error": error_msg,
-            "error_type": "value_error",
-            "is_mocked": False,
-        }
+        return create_error_response(
+            netuid,
+            hotkey,
+            ERROR_TYPES["VALUE_ERROR"],
+            STANDARD_ERROR_MESSAGES["VALUE_ERROR"],
+            original_error=str(e),
+        )
 
     except KeyError as e:
-        # Handle issues with missing expected data in API responses
+        # Handle issues with missing expected data
         error_msg = f"Missing expected data in API response: {str(e)}"
         logger.error(error_msg)
-        return {
-            "success": False,
-            "netuid": netuid,
-            "hotkey": hotkey,
-            "error": error_msg,
-            "error_type": "data_structure_error",
-            "is_mocked": False,
-        }
+        return create_error_response(
+            netuid,
+            hotkey,
+            ERROR_TYPES["DATA_ERROR"],
+            STANDARD_ERROR_MESSAGES["DATA_ERROR"],
+            original_error=str(e),
+        )
 
     except Exception as e:
         # Catch-all for unexpected errors
         error_msg = f"Unexpected error during sentiment analysis: {str(e)}"
         logger.error(f"{error_msg}. Traceback: ", exc_info=True)
-        return {
-            "success": False,
-            "netuid": netuid,
-            "hotkey": hotkey,
-            "error": error_msg,
-            "error_type": "unknown_error",
-            "is_mocked": False,
-        }
+        return create_error_response(
+            netuid,
+            hotkey,
+            ERROR_TYPES["UNKNOWN_ERROR"],
+            STANDARD_ERROR_MESSAGES["UNKNOWN_ERROR"],
+            original_error=str(e),
+        )
+
+
+def create_error_response(
+    netuid: int,
+    hotkey: str,
+    error_type: str,
+    error_message: str,
+    original_error: str = None,
+) -> Dict[str, Any]:
+    """
+    Creates a standardized error response with the detailed error logged but not exposed.
+
+    Args:
+        netuid: The subnet ID
+        hotkey: The hotkey
+        error_type: Standardized error type code
+        error_message: User-friendly error message
+        original_error: Original exception message (for logging only)
+
+    Returns:
+        Standardized error response dictionary
+    """
+    # Log the detailed error info if provided
+    if original_error:
+        logger.error(f"{error_message}. Original error: {original_error}")
+
+    return {
+        "success": False,
+        "netuid": netuid,
+        "hotkey": hotkey,
+        "error_type": error_type,
+        "error_message": error_message,
+        "is_mocked": True,
+    }
 
 
 @celery_app.task(name="analyze_twitter_sentiment")
@@ -131,7 +180,6 @@ def analyze_twitter_sentiment_task(netuid: int, hotkey: str) -> Dict[str, Any]:
     """
     try:
         # Simply call the synchronous function directly
-        # This avoids creating a new event loop and all the associated overhead
         result = perform_twitter_sentiment_analysis(netuid, hotkey)
         return result
 
@@ -140,11 +188,10 @@ def analyze_twitter_sentiment_task(netuid: int, hotkey: str) -> Dict[str, Any]:
         logger.warning(
             f"Sentiment analysis timed out for netuid={netuid}, hotkey={hotkey}"
         )
-        # Return partial results or error indication
-        return {
-            "success": False,
-            "netuid": netuid,
-            "hotkey": hotkey,
-            "error": "Task timed out during sentiment analysis",
-            "is_mocked": True,
-        }
+        # Return standardized timeout error
+        return create_error_response(
+            netuid,
+            hotkey,
+            ERROR_TYPES["TIMEOUT_ERROR"],
+            STANDARD_ERROR_MESSAGES["TIMEOUT_ERROR"],
+        )

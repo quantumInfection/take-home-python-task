@@ -15,6 +15,7 @@ from app.core.config import settings
 from app.auth.auth import get_api_key_from_header
 from app.tasks.sentiment_tasks import analyze_twitter_sentiment_task
 from app.tasks.blockchain_tasks import process_stake_based_on_sentiment_task
+import time
 
 router = APIRouter(tags=["Tao Dividends"])
 
@@ -263,6 +264,17 @@ def manage_tasks():
             logger.info(f"Task revocation metrics: {manager.revocation_metrics}")
 
         raise
+    finally:
+        # Always ensure tasks are properly cleaned up, even without exceptions
+        # This addresses potential resource leaks in normal execution flows
+        if manager.sentiment_task or manager.task_chain:
+            logger.debug("Performing final cleanup of task resources")
+            # We don't need to revoke successful tasks, but we may need to perform other cleanup
+            # For example, removing temporary files or closing connections
+
+            # Log metrics if any revocations were attempted during cleanup
+            if manager._revocation_metrics["attempts"] > 0:
+                logger.info(f"Task cleanup metrics: {manager.revocation_metrics}")
 
 
 # Mock function to simulate blockchain query with delay
@@ -291,6 +303,11 @@ async def get_tao_dividends(
     netuid: Optional[int] = Query(None, description="Subnet ID"),
     hotkey: Optional[str] = Query(None, description="Account hotkey"),
     trade: bool = Query(False, description="Trigger sentiment analysis and staking"),
+    wait_for_results: bool = Query(False, description="Wait for task completion"),
+    timeout: Optional[float] = Query(
+        None,
+        description="Timeout in seconds for waiting for task results (default: 20)",
+    ),
     api_key: str = Depends(get_api_key_from_header),
 ):
     """
@@ -304,14 +321,20 @@ async def get_tao_dividends(
     - netuid: Optional subnet ID (defaults to DEFAULT_NETUID from config)
     - hotkey: Optional account hotkey (defaults to DEFAULT_HOTKEY from config)
     - trade: If True, triggers sentiment analysis and staking background tasks
+    - wait_for_results: If True and trade is True, waits for task completion
+    - timeout: Maximum time to wait for task results in seconds (default: 20s)
 
     Returns:
     - Dividend data with cache status
     - If trade=True, includes information about triggered background tasks
+    - If wait_for_results=True, includes task results (or timeout status)
     """
     # Use default values if not provided
     actual_netuid = netuid if netuid is not None else settings.DEFAULT_NETUID
     actual_hotkey = hotkey if hotkey is not None else settings.DEFAULT_HOTKEY
+    actual_timeout = (
+        timeout if timeout is not None else 20.0
+    )  # Default timeout of 20 seconds
 
     # Try to get from cache first
     cached_result = cache_service.get_cached_data(actual_netuid, actual_hotkey)
@@ -371,6 +394,73 @@ async def get_tao_dividends(
                 logger.debug(
                     f"Task IDs: sentiment_task.id={sentiment_task_id}, chain_id={chain_id}"
                 )
+
+                # If wait_for_results is True, wait for tasks to complete with timeout
+                if wait_for_results:
+                    try:
+                        logger.info(
+                            f"Waiting for task completion with timeout={actual_timeout}s"
+                        )
+                        result["task_wait"] = {
+                            "enabled": True,
+                            "timeout": actual_timeout,
+                        }
+
+                        # Wait for the chained task to complete with timeout
+                        task_result = task_manager.task_chain.get(
+                            timeout=actual_timeout,
+                            propagate=False,  # Don't raise exceptions from the task
+                        )
+
+                        # Add task results to the response
+                        if task_result:
+                            result["task_completed"] = True
+                            result["task_result"] = task_result
+                        else:
+                            result["task_completed"] = False
+                            result["task_error"] = "Task returned None"
+
+                    except asyncio.TimeoutError:
+                        # Handle asyncio timeout
+                        logger.warning(
+                            f"Asyncio timeout waiting for task completion after {actual_timeout}s"
+                        )
+                        result["task_completed"] = False
+                        result["task_timeout"] = True
+                        result["task_error"] = f"Timed out after {actual_timeout}s"
+                        return JSONResponse(
+                            status_code=status.HTTP_504_GATEWAY_TIMEOUT, content=result
+                        )
+
+                    except CeleryTimeoutError:
+                        # Handle Celery timeout
+                        logger.warning(
+                            f"Celery timeout waiting for task completion after {actual_timeout}s"
+                        )
+                        result["task_completed"] = False
+                        result["task_timeout"] = True
+                        result["task_error"] = (
+                            f"Celery task timed out after {actual_timeout}s"
+                        )
+                        return JSONResponse(
+                            status_code=status.HTTP_504_GATEWAY_TIMEOUT, content=result
+                        )
+
+                    except Exception as e:
+                        # Handle other exceptions during task wait
+                        logger.error(f"Error waiting for task result: {str(e)}")
+                        result["task_completed"] = False
+                        result["task_error"] = f"Error retrieving task result: {str(e)}"
+                        return JSONResponse(
+                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            content=result,
+                        )
+                else:
+                    # Not waiting for results, just include task IDs
+                    result["task_ids"] = {
+                        "sentiment_task_id": sentiment_task_id,
+                        "chain_task_id": chain_id,
+                    }
 
             except Exception as e:
                 # Use the helper function to handle the error
