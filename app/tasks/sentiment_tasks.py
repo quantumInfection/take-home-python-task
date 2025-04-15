@@ -6,6 +6,7 @@ from celery.exceptions import SoftTimeLimitExceeded  # type: ignore
 from app.worker import celery_app
 from app.core.config import settings
 from app.services.sentiment_service import SentimentService
+from app.db import store_sentiment_data  # Import the database function
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,42 @@ def analyze_twitter_sentiment_task(netuid: int, hotkey: str) -> Dict[str, Any]:
 
         # Add hotkey to the result
         result["hotkey"] = actual_hotkey
+
+        # Store sentiment analysis result in MongoDB
+        if (
+            result.get("success", False)
+            and "sentiment_score" in result
+            and "tweets" in result
+        ):
+            try:
+                # Create a new event loop for the database operation
+                db_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(db_loop)
+
+                # Store the sentiment data
+                db_result = db_loop.run_until_complete(
+                    store_sentiment_data(
+                        netuid=actual_netuid,
+                        tweets=result.get("tweets", []),
+                        sentiment_score=result.get("sentiment_score", 0.0),
+                    )
+                )
+
+                # Close the loop
+                db_loop.close()
+
+                # Add database storage status to result
+                result["stored_in_db"] = True
+                result["db_record_id"] = db_result
+                logger.info(f"Sentiment data stored in database with ID: {db_result}")
+            except Exception as db_error:
+                logger.error(
+                    f"Failed to store sentiment data in database: {str(db_error)}"
+                )
+                result["stored_in_db"] = False
+                result["db_error"] = str(db_error)
+        else:
+            result["stored_in_db"] = False
 
         return result
 

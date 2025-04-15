@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Query, HTTPException, Depends, status
 from fastapi.responses import JSONResponse
 import warnings
-from typing import Optional, Dict, Any, Tuple, Callable
+from typing import Optional, Dict, Any, Tuple, Callable, List
 import asyncio
 import logging
 import traceback
@@ -18,6 +18,17 @@ from app.auth.auth import get_api_key_from_header
 from app.tasks.sentiment_tasks import analyze_twitter_sentiment_task
 from app.tasks.blockchain_tasks import process_stake_based_on_sentiment_task
 import time
+
+# Import database functions and models
+from app.db import (
+    get_dividend_history,
+    get_latest_sentiment,
+    record_stake_action,
+    store_dividend_data,  # Import the function to store dividend data
+    TaoDividendModel,
+    StakeActionModel,
+    SentimentDataModel,
+)
 
 router = APIRouter(tags=["Tao Dividends"])
 
@@ -296,7 +307,28 @@ async def get_tao_dividends(
         Dictionary with dividend data
     """
     try:
-        return await blockchain_service.get_tao_dividends(netuid, hotkey)
+        result = await blockchain_service.get_tao_dividends(netuid, hotkey)
+
+        # Store the dividend data in the database
+        if result and "dividend" in result:
+            try:
+                # Store the result in the database
+                await store_dividend_data(
+                    netuid=netuid if netuid is not None else settings.DEFAULT_NETUID,
+                    hotkey=hotkey if hotkey is not None else settings.DEFAULT_HOTKEY,
+                    dividend=result.get("dividend", 0),
+                )
+                logger.info(
+                    f"Dividend data stored in database for netuid={netuid}, hotkey={hotkey}"
+                )
+            except Exception as db_error:
+                logger.error(
+                    f"Error storing dividend data in database: {str(db_error)}"
+                )
+                # Don't fail the query just because DB storage failed
+                # Just continue with the result
+
+        return result
     except Exception as e:
         logger.error(f"Error querying blockchain: {str(e)}", exc_info=True)
         raise HTTPException(
@@ -616,3 +648,127 @@ async def purge_cache_endpoint(
         return {"success": True, "message": message}
     else:
         raise HTTPException(status_code=500, detail="Failed to purge cache")
+
+
+@router.get("/dividend_history", response_model=List[Dict[str, Any]])
+async def get_dividend_history_endpoint(
+    netuid: Optional[int] = Query(None, description="Filter by Subnet ID"),
+    hotkey: Optional[str] = Query(None, description="Filter by account hotkey"),
+    limit: int = Query(100, description="Maximum number of records to return"),
+    api_key: str = Depends(get_api_key_from_header),
+):
+    """
+    Retrieve dividend history from the database.
+
+    Parameters:
+    - netuid: Optional filter by subnet ID
+    - hotkey: Optional filter by hotkey
+    - limit: Maximum number of records to return (default: 100)
+
+    Returns:
+    - List of dividend history records
+    """
+    try:
+        history = await get_dividend_history(netuid=netuid, hotkey=hotkey, limit=limit)
+        return history
+    except Exception as e:
+        logger.error(f"Error retrieving dividend history: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error retrieving dividend history: {str(e)}",
+        )
+
+
+@router.get("/sentiment_history", response_model=Dict[str, Any])
+async def get_sentiment_history_endpoint(
+    netuid: int = Query(..., description="Subnet ID to get sentiment for"),
+    api_key: str = Depends(get_api_key_from_header),
+):
+    """
+    Retrieve the latest sentiment analysis for a specific subnet.
+
+    Parameters:
+    - netuid: Subnet ID to get sentiment for
+
+    Returns:
+    - Latest sentiment data including score and analyzed tweets
+    """
+    try:
+        sentiment_data = await get_latest_sentiment(netuid=netuid)
+        if sentiment_data:
+            return sentiment_data
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No sentiment data found for netuid {netuid}",
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving sentiment data: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error retrieving sentiment data: {str(e)}",
+        )
+
+
+@router.get("/stake_history", response_model=List[Dict[str, Any]])
+async def get_stake_history_endpoint(
+    netuid: Optional[int] = Query(None, description="Filter by Subnet ID"),
+    hotkey: Optional[str] = Query(None, description="Filter by account hotkey"),
+    action_type: Optional[str] = Query(
+        None, description="Filter by action type (stake/unstake)"
+    ),
+    limit: int = Query(100, description="Maximum number of records to return"),
+    api_key: str = Depends(get_api_key_from_header),
+):
+    """
+    Retrieve staking action history from the database.
+
+    Parameters:
+    - netuid: Optional filter by subnet ID
+    - hotkey: Optional filter by hotkey
+    - action_type: Optional filter by action type ('stake' or 'unstake')
+    - limit: Maximum number of records to return (default: 100)
+
+    Returns:
+    - List of stake action history records
+    """
+    try:
+        # We need to implement this function in mongo.py
+        from app.db.mongo import get_stake_history
+
+        history = await get_stake_history(
+            netuid=netuid, hotkey=hotkey, action_type=action_type, limit=limit
+        )
+        return history
+    except Exception as e:
+        logger.error(f"Error retrieving stake history: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error retrieving stake history: {str(e)}",
+        )
+
+
+@router.get("/db_stats")
+async def get_database_stats_endpoint(
+    api_key: str = Depends(get_api_key_from_header),
+):
+    """
+    Get database statistics and collection counts.
+
+    Returns:
+    - Collection statistics including document counts
+    """
+    try:
+        # We need to implement this function in mongo.py
+        from app.db.mongo import get_database_stats
+
+        stats = await get_database_stats()
+        return stats
+    except Exception as e:
+        logger.error(f"Error retrieving database stats: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error retrieving database stats: {str(e)}",
+        )
