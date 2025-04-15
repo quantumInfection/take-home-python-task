@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Query, HTTPException
 from typing import Optional, Dict, Any
 import time
+import asyncio
 
 from app.services.cache_service import RedisCacheService
 from app.core.config import settings
@@ -20,7 +21,7 @@ async def mock_get_tao_dividends(
     In a real implementation, this would query the Bittensor blockchain.
     """
     # Simulate network delay
-    time.sleep(2)
+    await asyncio.sleep(2)
 
     # Use default values if not provided
     actual_netuid = netuid if netuid is not None else settings.DEFAULT_NETUID
