@@ -1,6 +1,5 @@
 from fastapi import APIRouter, Query, HTTPException
 from typing import Optional, Dict, Any
-import time
 import asyncio
 
 from app.services.cache_service import RedisCacheService
