@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, HTTPException, Depends
 from typing import Optional, Dict, Any
 import asyncio
 
 from app.services.cache_service import RedisCacheService
 from app.core.config import settings
+from app.auth.auth import get_api_key_from_header
 
 router = APIRouter(tags=["Tao Dividends"])
 
@@ -36,6 +37,7 @@ async def mock_get_tao_dividends(
 async def get_tao_dividends_with_cache(
     netuid: Optional[int] = Query(None, description="Subnet ID"),
     hotkey: Optional[str] = Query(None, description="Account hotkey"),
+    api_key: str = Depends(get_api_key_from_header),
 ):
     """
     Get Tao dividends with Redis caching.
@@ -61,6 +63,7 @@ async def get_tao_dividends_with_cache(
 async def get_tao_dividends_without_cache(
     netuid: Optional[int] = Query(None, description="Subnet ID"),
     hotkey: Optional[str] = Query(None, description="Account hotkey"),
+    api_key: str = Depends(get_api_key_from_header),
 ):
     """
     Get Tao dividends directly without using cache.
@@ -78,6 +81,7 @@ async def purge_cache_endpoint(
     hotkey: Optional[str] = Query(
         None, description="Account hotkey to purge cache for"
     ),
+    api_key: str = Depends(get_api_key_from_header),
 ):
     """
     Purge cache for specific netuid/hotkey combination.
