@@ -1,6 +1,5 @@
 from fastapi import Depends, HTTPException, Security, status
 from fastapi.security import APIKeyHeader
-import os
 from app.core.config import settings
 
 # API key header extractor
