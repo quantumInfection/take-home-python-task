@@ -378,6 +378,37 @@ async def get_tao_dividends(
                 if not task_manager.task_chain:
                     raise TaskChainingError("Failed to create task chain")
 
+                # Store reference to the full chain for proper monitoring
+                chain_result = AsyncResult(task_manager.task_chain.id)
+                task_manager.full_chain = chain_result
+
+                # Track the chain lineage with a depth limit to avoid excessive traversal
+                chain_lineage = []
+                current_task = chain_result
+                depth = 0
+                max_depth = 10  # Reasonable limit for most practical chains
+
+                while current_task and current_task.parent and depth < max_depth:
+                    chain_lineage.append(current_task.id)
+                    current_task = current_task.parent
+                    depth += 1
+
+                if depth >= max_depth and current_task and current_task.parent:
+                    logger.warning(
+                        f"Chain lineage traversal stopped at depth {max_depth}. Chain may be longer than expected."
+                    )
+
+                # Add the root task (sentiment_task) if not already included
+                if (
+                    task_manager.sentiment_task
+                    and task_manager.sentiment_task.id not in chain_lineage
+                ):
+                    chain_lineage.append(task_manager.sentiment_task.id)
+
+                logger.debug(
+                    f"Task chain lineage (depth: {depth}): {chain_lineage[::-1]}"
+                )  # Reverse to show in execution order
+
                 result["stake_tx_triggered"] = True
                 result["task_timeouts"] = {
                     "sentiment_analysis": "8s soft, 10s hard",

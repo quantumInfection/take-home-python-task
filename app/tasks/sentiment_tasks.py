@@ -28,6 +28,29 @@ STANDARD_ERROR_MESSAGES = {
 }
 
 
+def validate_error_types():
+    """
+    Validates that all error types have corresponding standard messages.
+    This function should be called during application initialization
+    rather than at module import time to allow for dynamic extension of error types.
+    """
+    missing_types = []
+    for error_type in ERROR_TYPES.keys():
+        if error_type not in STANDARD_ERROR_MESSAGES:
+            missing_types.append(error_type)
+
+    if missing_types:
+        error_msg = f"Missing standard error messages for error types: {', '.join(missing_types)}"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+
+    logger.debug(f"Validated {len(ERROR_TYPES)} error types with standard messages")
+
+
+# Note: The validate_error_types() function should be called during application
+# initialization in main.py or worker.py, not at module import time
+
+
 def perform_twitter_sentiment_analysis(netuid: int, hotkey: str) -> Dict[str, Any]:
     """
     Synchronous function that simulates Twitter sentiment analysis workflow.
@@ -137,7 +160,7 @@ def create_error_response(
     hotkey: str,
     error_type: str,
     error_message: str,
-    original_error: str = None,
+    original_error: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Creates a standardized error response with the detailed error logged but not exposed.
@@ -161,7 +184,7 @@ def create_error_response(
         "netuid": netuid,
         "hotkey": hotkey,
         "error_type": error_type,
-        "error_message": error_message,
+        "error": error_message,  # Changed from error_message to error for consistency
         "is_mocked": True,
     }
 
