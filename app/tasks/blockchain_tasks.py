@@ -5,6 +5,7 @@ from celery.exceptions import SoftTimeLimitExceeded  # type: ignore
 from app.worker import celery_app
 from app.core.config import settings
 from app.services.blockchain_service import BlockchainService
+from app.db import record_stake_action  # Import the database function
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,40 @@ def process_stake_based_on_sentiment_task(
 
         # Add sentiment information to the result
         result["sentiment_score"] = sentiment_score
+
+        # Record the stake action in the database if blockchain operation was successful
+        if result.get("success", False):
+            try:
+                # Create a new event loop for the database operation
+                db_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(db_loop)
+
+                # Store the stake action
+                db_result = db_loop.run_until_complete(
+                    record_stake_action(
+                        netuid=netuid,
+                        hotkey=hotkey,
+                        action_type=operation,  # "add_stake" or "unstake"
+                        amount=amount,
+                        sentiment_score=sentiment_score,
+                    )
+                )
+
+                # Close the loop
+                db_loop.close()
+
+                # Add database storage status to result
+                result["stored_in_db"] = True
+                result["db_record_id"] = db_result
+                logger.info(f"Stake action recorded in database with ID: {db_result}")
+            except Exception as db_error:
+                logger.error(
+                    f"Failed to store stake action in database: {str(db_error)}"
+                )
+                result["stored_in_db"] = False
+                result["db_error"] = str(db_error)
+        else:
+            result["stored_in_db"] = False
 
         logger.info(f"Completed blockchain {operation} operation: {result['success']}")
 

@@ -2,6 +2,7 @@ import os
 from fastapi import FastAPI
 from app.core.config import settings
 from app.api.routes import router
+from app.db import get_db_client, close_db_connection
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -30,6 +31,21 @@ app.include_router(router, prefix="/api/v1")
 async def health_check():
     """Health check endpoint to verify API is running"""
     return {"status": "healthy"}
+
+
+# Database startup and shutdown event handlers
+@app.on_event("startup")
+async def startup_db_client():
+    """Initialize database connection on startup"""
+    await get_db_client()
+    print("MongoDB connection established")
+
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    """Close database connection on shutdown"""
+    await close_db_connection()
+    print("MongoDB connection closed")
 
 
 if __name__ == "__main__":
